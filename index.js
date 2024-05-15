@@ -6,6 +6,7 @@ const session = require('express-session');
 const MongoStore = require('connect-mongo');
 const bcrypt = require('bcrypt');
 const saltRounds = 12;
+const mongoose = require('mongoose');
 
 const port = process.env.PORT || 3000;
 
@@ -15,7 +16,7 @@ const Joi = require("joi");
 
 const expireTime = 60 * 60 * 1000;
 
-/* Secret information section */
+/* Secret information section */    
 const mongodb_host = process.env.MONGODB_HOST;
 const mongodb_user = process.env.MONGODB_USER;
 const mongodb_password = process.env.MONGODB_PASSWORD;
@@ -25,7 +26,7 @@ const mongodb_session_secret = process.env.MONGODB_SESSION_SECRET;
 const node_session_secret = process.env.NODE_SESSION_SECRET;
 /* END secret section */
 
-var { database } = include('databaseConnection'); // Original comment corrected
+var { database } = include('databaseConnection');
 
 const userCollection = database.db(mongodb_database).collection('users');
 
@@ -82,34 +83,37 @@ function adminAuthorization(req, res, next) {
         next();
     }
 }
-
-// Routes with original comments
-
+//first route
 app.get('/', (req, res) => {
     res.render("index");
 });
 
 app.get('/nosql-injection', async (req,res) => {
-    var username = req.query.user;
+	var username = req.query.user;
 
-    if (!username) {
-        res.send(`<h3>no user provided - try /nosql-injection?user=name</h3> <h3>or /nosql-injection?user[$ne]=name</h3>`);
-        return;
-    }
-    console.log("user: "+username);
+	if (!username) {
+		res.send(`<h3>no user provided - try /nosql-injection?user=name</h3> <h3>or /nosql-injection?user[$ne]=name</h3>`);
+		return;
+	}
+	console.log("user: "+username);
 
-    const schema = Joi.string().max(20).required();
-    const validationResult = schema.validate(username);
+	const schema = Joi.string().max(20).required();
+	const validationResult = schema.validate(username);
 
-    if (validationResult.error != null) {  
-       console.log(validationResult.error);
-       res.send("<h1 style='color:darkred;'>A NoSQL injection attack was detected!!</h1>");
-       return;
-    }   
+	//If we didn't use Joi to validate and check for a valid URL parameter below
+	// we could run our userCollection.find and it would be possible to attack.
+	// A URL parameter of user[$ne]=name would get executed as a MongoDB command
+	// and may result in revealing information about all users or a successful
+	// login without knowing the correct password.
+	if (validationResult.error != null) {  
+	   console.log(validationResult.error);
+	   res.send("<h1 style='color:darkred;'>A NoSQL injection attack was detected!!</h1>");
+	   return;
+	}	
 
-    const result = await userCollection.find({username: username}).project({username: 1, password: 1, _id: 1}).toArray();
+	const result = await userCollection.find({username: username}).project({username: 1, password: 1, _id: 1}).toArray();
 
-    console.log(result);
+	console.log(result);
 
     res.send(`<h1>Hello ${username}</h1>`);
 });
@@ -122,21 +126,45 @@ app.get('/loggedIn', (req, res) => {
     }
 });
 
-app.post('/loggingin', async (req, res) => {
-    var name = req.body.name;
+app.post('/loggingin', async (req,res) => {
+    var username = req.body.name;
     var password = req.body.password;
 
-    const result = await userCollection.find({ name: name }).project({ name: 1, password: 1, _id: 1 }).toArray();
+    
+    console.log("Username " + username, "Password " + password);
+	const schema = Joi.string().max(20).required();
+	const validationResult = schema.validate(username);
+	if (validationResult.error != null) {
+	   console.log(validationResult.error);
+	   res.redirect("/login");
+	   return;
+	}
 
-    if (result.length != 1 || !(await bcrypt.compare(password, result[0].password))) {
-        res.redirect("/tryagain");
-    } else {
-        req.session.authenticated = true;
-        req.session.name = name;
-        req.session.cookie.maxAge = expireTime;
-        res.redirect('/loggedIn');
-    }
+	const result = await userCollection.find({username: username}).project({username: 1, password: 1, user_type: 1, _id: 1}).toArray();
+
+	console.log(result);
+	if (result.length < 1) {
+		console.log("user not found");
+		res.redirect("/login");
+		return;
+	}
+	if (await bcrypt.compare(password, result[0].password)) {
+		console.log("correct password");
+		req.session.authenticated = true;
+		req.session.username = username;
+        req.session.user_type = result[0].user_type;
+		req.session.cookie.maxAge = expireTime;
+
+		res.redirect('/loggedIn');
+		return;
+	}
+	else {
+		console.log("incorrect password");
+		res.redirect("/login");
+		return;
+	}
 });
+
 
 app.get('/tryagain', (req, res) => {
     res.render("tryagain");
@@ -152,30 +180,37 @@ app.post('/submitEmail', (req,res) => {
     }
 });
 
-app.get('/signup', (req, res) => {
-    res.render("signup");
+app.get('/createUser', (req,res) => {
+    res.render("createUser");
 });
 
+
+// Create a new user, validate user
+// and insert into the database
+// If the user is successfully created, render the submitUser page
+// If the user is not successfully created, redirect to the createUser page
+// with the error message
 app.post('/submitUser', async (req,res) => {
     var username = req.body.username;
     var password = req.body.password;
 
-    const schema = Joi.object(
-        {
-            username: Joi.string().alphanum().max(20).required(),
-            password: Joi.string().max(20).required()
-        });
-    
-    const validationResult = schema.validate({username, password});
-    if (validationResult.error != null) {
-       console.log(validationResult.error);
-       res.redirect("/signup");
-       return;
+	const schema = Joi.object(
+		{
+			username: Joi.string().alphanum().max(20).required(),
+			password: Joi.string().max(20).required()
+		});
+	
+	const validationResult = schema.validate({username, password});
+	if (validationResult.error != null) {
+	   console.log(validationResult.error);
+	   res.redirect("/createUser");
+	   return;
    }
+
     var hashedPassword = await bcrypt.hash(password, saltRounds);
-    
-    await userCollection.insertOne({username: username, password: hashedPassword, user_type: "user"});
-    console.log("Inserted user");
+	
+	await userCollection.insertOne({username: username, password: hashedPassword, user_type: "user"});
+	console.log("Inserted user");
 
     var html = "successfully created user";
     res.render("submitUser", {html: html});
@@ -200,8 +235,9 @@ app.get('/logout', (req, res) => {
     req.session.destroy();
     res.redirect('/');
 });
+
 // Promote the user by name
-app.post("/promote/:name", async (req, res) => {
+app.post("/promote", async (req, res) => {
     var name = req.params.name; 
         await userCollection.findOneAndUpdate(
             { name: name }, // Find the user by name
@@ -212,7 +248,7 @@ app.post("/promote/:name", async (req, res) => {
 );
 
 // Demote the user by name
-app.post("/demote/:name", async (req, res) => {
+app.post("/demote", async (req, res) => {
     var name = req.params.name;
 
         await userCollection.findOneAndUpdate(
@@ -239,8 +275,8 @@ app.get('/members', (req, res) => {
 });
 
 app.get('/admin', sessionValidation, adminAuthorization, async (req,res) => {
-    const result = await userCollection.find().project({username: 1, _id: 1, }).toArray();
- 
+    const result = await userCollection.find().project({username: 1, _id: 1, user_type: 1}).toArray();
+    console.log(result);
     res.render("admin", {users: result});
 });
 
